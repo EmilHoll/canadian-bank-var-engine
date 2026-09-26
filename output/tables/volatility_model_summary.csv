@@ -1,0 +1,11 @@
+statistic,value
+EWMA lambda,0.94
+GARCH omega,0.024501045852531746
+GARCH alpha,0.17914933796794832
+GARCH beta,0.7994401535610356
+GARCH persistence,0.9785894915289839
+GARCH unconditional daily volatility,0.010697414422047344
+Average EWMA daily volatility,0.00862648026461654
+Average GARCH daily volatility,0.008625897885009217
+Latest EWMA daily volatility,0.010208409056172377
+Latest GARCH daily volatility,0.010765107038497241

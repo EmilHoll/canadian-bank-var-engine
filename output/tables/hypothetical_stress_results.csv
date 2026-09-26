@@ -1,0 +1,4 @@
+scenario,portfolio_stress_return,portfolio_stress_pnl,stress_loss,largest_single_asset_loss
+Broad Bank Selloff,-0.1,-100000,100000,-16666.666666666668
+Recession and Credit Stress,-0.12666666666666665,-126666.66666666666,126666.66666666666,-26666.666666666664
+Severe Systemic Bank Shock,-0.2,-200000,200000,-33333.333333333336

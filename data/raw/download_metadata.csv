@@ -1,0 +1,2 @@
+download_timestamp_utc,data_source,requested_start_date,requested_end_date,number_of_tickers
+2026-07-17 03:19:49 UTC,Yahoo Finance via tidyquant::tq_get,2015-01-01,2026-07-16,6

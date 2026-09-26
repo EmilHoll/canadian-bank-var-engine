@@ -1,0 +1,9 @@
+risk_measure,value,unit
+Portfolio Value,1000000,CAD
+Latest EWMA Annualized Volatility,0.16205346986551025,Percent
+Latest GARCH Annualized Volatility,0.17089077636512837,Percent
+Latest 99% Historical VaR,21337.59695753697,CAD
+Latest 99% GARCH VaR,19103.043843056486,CAD
+Full-Sample 99% Historical ES,45335.27911718818,CAD
+Full-Sample 99% Gaussian ES,28211.26291913389,CAD
+Largest Stress Loss,392163.1558565577,CAD

@@ -1,0 +1,2129 @@
+---
+title: "Canadian Bank Market Risk VaR Engine"
+author: "Emil Holland"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 5.5
+)
+
+library(here)
+
+source(
+  here::here(
+    "R",
+    "00_project_setup.R"
+  )
+)
+
+source(
+  here::here(
+    "R",
+    "01_define_portfolio.R"
+  )
+)
+```
+
+```{r risk-dashboard, include=FALSE}
+
+if (!exists("model_comparison_dashboard")) {
+  source(
+    here::here(
+      "R",
+      "11_risk_dashboard.R"
+    )
+  )
+}
+
+```
+
+```{r executive-summary-inputs, include=FALSE}
+
+# Highest-ranked 99% VaR model under the descriptive
+# dashboard ranking established in Step 13
+
+preferred_model_99 <-
+  model_comparison_dashboard |>
+  dplyr::filter(
+    confidence_level == 0.99
+  ) |>
+  dplyr::arrange(
+    descriptive_rank
+  ) |>
+  dplyr::slice_head(
+    n = 1
+  )
+
+preferred_model_name <-
+  preferred_model_99$model
+
+preferred_model_tests_passed <-
+  preferred_model_99$statistical_tests_passed
+
+preferred_model_violation_ratio <-
+  preferred_model_99$violation_ratio
+
+
+# Latest 99% VaR for that model
+
+preferred_model_latest_var <-
+  latest_var_dashboard |>
+  dplyr::filter(
+    confidence_level == 0.99,
+    model == preferred_model_name
+  ) |>
+  dplyr::pull(
+    var_dollar
+  )
+
+
+# Largest historical stress loss
+
+largest_historical_stress <-
+  stress_comparison_dashboard |>
+  dplyr::filter(
+    stress_type == "Historical"
+  ) |>
+  dplyr::slice_max(
+    stress_loss,
+    n = 1,
+    with_ties = FALSE
+  )
+
+
+# Largest hypothetical stress loss
+
+largest_hypothetical_stress <-
+  stress_comparison_dashboard |>
+  dplyr::filter(
+    stress_type == "Hypothetical"
+  ) |>
+  dplyr::slice_max(
+    stress_loss,
+    n = 1,
+    with_ties = FALSE
+  )
+```
+
+# Executive Summary
+
+The Canadian Bank Market Risk VaR Engine evaluates the market risk of an equal-weight portfolio of six major Canadian banks with an initial notional value of `r scales::dollar(portfolio_value, prefix = "CAD $")`. The analysis combines Value at Risk (VaR), Expected Shortfall (ES), dynamic volatility modelling, out-of-sample backtesting, and historical and hypothetical stress testing.
+
+Four one-day VaR methodologies are evaluated in the rolling backtest: Historical Simulation, Rolling Gaussian VaR, EWMA Gaussian VaR, and GARCH(1,1) Gaussian VaR. At the 99% confidence level, the highest-ranked model under the dashboard's descriptive validation criteria is **`r preferred_model_name`**, which passes `r preferred_model_tests_passed` of the three statistical tests considered. This ranking should not be interpreted as definitive model selection; model performance must also be evaluated in terms of stability, responsiveness, tail assumptions, and economic usefulness.
+
+The latest 99% VaR estimate from this model is approximately **`r scales::dollar(preferred_model_latest_var, prefix = "CAD $")`**. This represents a model-implied one-day loss threshold rather than a maximum possible portfolio loss.
+
+Tail-risk analysis demonstrates the importance of examining losses beyond the VaR boundary. Full-sample 99% Historical Expected Shortfall is approximately **`r scales::dollar(historical_es_99, prefix = "CAD $")`**, measuring the average historical loss conditional on entering approximately the worst 1% of the return distribution.
+
+Stress testing produces substantially different information from probabilistic VaR. The largest loss across the stress scenarios considered is approximately **`r scales::dollar(largest_stress_loss, prefix = "CAD $")`**, illustrating that severe scenario losses can materially exceed ordinary one-day VaR estimates.
+
+The results also highlight an important concentration risk. Although the portfolio contains six securities, every constituent belongs to the Canadian banking sector. Security-level diversification therefore does not eliminate exposure to systemic banking, credit, interest-rate, or macroeconomic shocks affecting the sector as a whole.
+
+
+
+# Portfolio Definition
+
+
+The baseline portfolio contains six major Canadian publicly traded banks. Each security initially receives an equal portfolio weight.
+
+```{r executive-risk-snapshot}
+current_risk_snapshot |>
+  dplyr::mutate(
+
+    Display = dplyr::case_when(
+
+      unit == "CAD" ~
+        scales::dollar(
+          value,
+          prefix = "CAD $"
+        ),
+
+      unit == "Percent" ~
+        scales::percent(
+          value,
+          accuracy = 0.01
+        ),
+
+      TRUE ~
+        as.character(
+          value
+        )
+    )
+  ) |>
+  dplyr::select(
+    `Risk Measure` = risk_measure,
+    Value = Display
+  ) |>
+  knitr::kable(
+    caption =
+      "Executive Market Risk Snapshot"
+  )
+```
+
+```{r portfolio-definition, include=FALSE}
+source(
+  here::here(
+    "R",
+    "01_define_portfolio.R"
+  )
+)
+
+portfolio_definition |>
+  dplyr::mutate(
+    weight = scales::percent(weight, accuracy = 0.01),
+    position_value = scales::dollar(
+      position_value,
+      prefix = "CAD $"
+    )
+  ) |>
+  knitr::kable(
+    col.names = c(
+      "Ticker",
+      "Bank",
+      "Portfolio Weight",
+      "Position Value"
+    ),
+    caption = "Baseline Canadian Bank Portfolio"
+  )
+```
+
+The initial portfolio value is `r scales::dollar(portfolio_value, prefix = "CAD $")`. Risk will be measured over a `r var_horizon_days`-day horizon at the `r paste(scales::percent(confidence_levels), collapse = " and ")` confidence levels.
+
+# Data and Methodology
+
+Daily stock-price data are obtained from Yahoo Finance using the `tidyquant` package. Adjusted closing prices are used so that the return series reflects relevant corporate actions, including stock splits and dividend distributions.
+
+```{r download-market-data, include=FALSE}
+source(
+  here::here(
+    "R",
+    "02_download_data.R"
+  )
+)
+```
+
+## Data Coverage
+
+```{r data-quality-table}
+data_quality_summary |>
+  dplyr::mutate(
+    first_observation = format(first_observation),
+    last_observation = format(last_observation),
+    number_of_observations = scales::comma(
+      number_of_observations
+    )
+  ) |>
+  knitr::kable(
+    col.names = c(
+      "Ticker",
+      "Bank",
+      "First Observation",
+      "Last Observation",
+      "Observations",
+      "Missing Adjusted Prices",
+      "Duplicate Dates"
+    ),
+    caption = "Historical Market-Data Coverage"
+  )
+```
+
+## Adjusted Stock Prices
+
+```{r adjusted-price-plot}
+raw_bank_prices |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date,
+      y = adjusted
+    )
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.5
+  ) +
+  ggplot2::facet_wrap(
+    ~ ticker,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  ggplot2::labs(
+    title = "Adjusted Prices of Canadian Bank Stocks",
+    subtitle = "Daily observations",
+    x = NULL,
+    y = "Adjusted price (CAD)"
+  )
+```
+
+## Return Construction
+
+For each bank, the daily simple return is calculated as
+
+\[
+R_{i,t}
+=
+\frac{P_{i,t}}{P_{i,t-1}}-1,
+\]
+
+where \(P_{i,t}\) is the adjusted closing price of asset \(i\) on date \(t\).
+
+The corresponding continuously compounded return is
+
+\[
+r_{i,t}
+=
+\ln(1+R_{i,t}).
+\]
+
+The baseline portfolio is treated as a daily-rebalanced, constant-weight portfolio. Its simple return is therefore
+
+\[
+R_{p,t}
+=
+\sum_{i=1}^{N}w_iR_{i,t}.
+\]
+
+The portfolio log return is calculated from the aggregated simple return:
+
+\[
+r_{p,t}
+=
+\ln(1+R_{p,t}).
+\]
+
+```{r prepare-returns, include=FALSE}
+source(
+  here::here(
+    "R",
+    "03_prepare_returns.R"
+  )
+)
+```
+
+## Return-Data Alignment
+
+Only dates containing valid returns for all six portfolio assets are retained.
+
+```{r return-alignment-table}
+return_alignment_summary |>
+  knitr::kable(
+    col.names = c(
+      "Number of Assets",
+      "Candidate Return Dates",
+      "Common Return Dates",
+      "Dates Removed"
+    ),
+    caption = "Return-Panel Alignment Summary"
+  )
+```
+
+# Exploratory Analysis
+
+## Daily Portfolio Returns
+
+```{r portfolio-return-time-series}
+portfolio_returns |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date,
+      y = portfolio_simple_return
+    )
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linewidth = 0.3
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.45
+  ) +
+  ggplot2::scale_y_continuous(
+    labels = scales::label_percent(
+      accuracy = 1
+    )
+  ) +
+  ggplot2::labs(
+    title = "Daily Returns of the Canadian Bank Portfolio",
+    subtitle = "Equal-weight, daily-rebalanced portfolio",
+    x = NULL,
+    y = "Daily return"
+  )
+```
+
+## Cumulative Portfolio Performance
+
+```{r cumulative-portfolio-performance}
+portfolio_returns |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date,
+      y = cumulative_wealth_index
+    )
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.7
+  ) +
+  ggplot2::labs(
+    title = "Cumulative Growth of the Portfolio",
+    subtitle = "Growth of one monetary unit invested at the beginning of the return sample",
+    x = NULL,
+    y = "Cumulative wealth index"
+  )
+```
+
+## Descriptive Risk Statistics
+
+Before estimating Value at Risk, the empirical distribution of portfolio returns is examined. Particular attention is given to volatility, skewness, kurtosis, extreme observations, and dependence among the constituent securities.
+
+```{r descriptive-risk-analysis, include=FALSE}
+source(
+  here::here(
+    "R",
+    "04_descriptive_risk_analysis.R"
+  )
+)
+```
+
+```{r portfolio-risk-summary}
+portfolio_risk_summary |>
+  dplyr::transmute(
+    Observations = observations,
+    `Annualized Return` =
+      scales::percent(
+        annualized_return,
+        accuracy = 0.01
+      ),
+    `Annualized Volatility` =
+      scales::percent(
+        annualized_volatility,
+        accuracy = 0.01
+      ),
+    Skewness =
+      round(skewness, 3),
+    `Excess Kurtosis` =
+      round(
+        excess_kurtosis,
+        3
+      ),
+    `Worst Daily Return` =
+      scales::percent(
+        minimum_daily_return,
+        accuracy = 0.01
+      ),
+    `Best Daily Return` =
+      scales::percent(
+        maximum_daily_return,
+        accuracy = 0.01
+      ),
+    `Maximum Drawdown` =
+      scales::percent(
+        maximum_drawdown,
+        accuracy = 0.01
+      )
+  ) |>
+  knitr::kable(
+    caption =
+      "Portfolio Descriptive Risk Statistics"
+  )
+```
+
+## Distribution of Portfolio Returns
+
+```{r portfolio-return-distribution}
+portfolio_returns |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = portfolio_simple_return
+    )
+  ) +
+  ggplot2::geom_histogram(
+    bins = 60,
+    boundary = 0
+  ) +
+  ggplot2::scale_x_continuous(
+    labels =
+      scales::label_percent(
+        accuracy = 1
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Distribution of Daily Portfolio Returns",
+    subtitle =
+      "Empirical distribution of the equal-weight Canadian bank portfolio",
+    x = "Daily return",
+    y = "Frequency"
+  )
+```
+
+## Rolling Portfolio Volatility
+
+```{r rolling-volatility}
+rolling_volatility |>
+  dplyr::select(
+    date,
+    rolling_21d_volatility,
+    rolling_63d_volatility
+  ) |>
+  tidyr::pivot_longer(
+    cols = -date,
+    names_to = "window",
+    values_to = "volatility"
+  ) |>
+  dplyr::mutate(
+    window =
+      dplyr::recode(
+        window,
+        rolling_21d_volatility =
+          "21-Day Volatility",
+        rolling_63d_volatility =
+          "63-Day Volatility"
+      )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date,
+      y = volatility,
+      linetype = window
+    )
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.55
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_percent(
+        accuracy = 1
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Rolling Annualized Portfolio Volatility",
+    subtitle =
+      "21-day and 63-day rolling estimation windows",
+    x = NULL,
+    y = "Annualized volatility",
+    linetype = NULL
+  )
+```
+
+## Cross-Asset Correlations
+
+```{r correlation-matrix}
+correlation_table |>
+  dplyr::mutate(
+    dplyr::across(
+      -ticker,
+      ~ round(.x, 3)
+    )
+  ) |>
+  knitr::kable(
+    caption =
+      "Daily Return Correlations Among Canadian Banks"
+  )
+```
+
+## Largest Historical Daily Losses
+
+```{r worst-historical-days}
+worst_portfolio_days |>
+  dplyr::mutate(
+    portfolio_simple_return =
+      scales::percent(
+        portfolio_simple_return,
+        accuracy = 0.01
+      ),
+    portfolio_pnl =
+      scales::dollar(
+        portfolio_pnl,
+        prefix = "CAD $"
+      )
+  ) |>
+  knitr::kable(
+    col.names = c(
+      "Date",
+      "Portfolio Return",
+      "Portfolio P&L"
+    ),
+    caption =
+      "Ten Worst Portfolio Trading Days"
+  )
+```
+
+# Value at Risk
+
+Value at Risk (VaR) estimates the loss threshold associated with a specified confidence level and risk horizon. The analysis considers one-day VaR at both the 95% and 99% confidence levels.
+
+Two approaches are compared: Historical Simulation and a Parametric Gaussian variance-covariance model.
+
+```{r var-models, include=FALSE}
+source(
+  here::here(
+    "R",
+    "05_var_models.R"
+  )
+)
+```
+
+## Historical Simulation VaR
+
+Historical Simulation makes no parametric distributional assumption. For confidence level \(c\), VaR is estimated from the empirical lower tail of historical portfolio returns:
+
+\[
+VaR_c
+=
+-Q_{1-c}(R_p).
+\]
+
+Thus, 95% VaR corresponds to the negative of the empirical 5th percentile, while 99% VaR corresponds to the negative of the empirical 1st percentile.
+
+## Parametric Gaussian VaR
+
+The parametric model assumes that daily portfolio returns follow a normal distribution:
+
+\[
+R_p
+\sim
+N(\mu_p,\sigma_p^2).
+\]
+
+Portfolio volatility is calculated using the asset covariance matrix:
+
+\[
+\sigma_p
+=
+\sqrt{
+\mathbf{w}'\Sigma\mathbf{w}
+}.
+\]
+
+The resulting VaR is
+
+\[
+VaR_c
+=
+-\left[
+\mu_p
++
+z_{1-c}\sigma_p
+\right].
+\]
+
+## VaR Estimates
+
+```{r var-results-table}
+var_results |>
+  dplyr::mutate(
+    `Confidence Level` =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      ),
+
+    `VaR (%)` =
+      scales::percent(
+        var_return,
+        accuracy = 0.01
+      ),
+
+    `VaR (CAD)` =
+      scales::dollar(
+        var_dollar,
+        prefix = "CAD $"
+      )
+  ) |>
+  dplyr::select(
+    Model = model,
+    `Confidence Level`,
+    `VaR (%)`,
+    `VaR (CAD)`
+  ) |>
+  knitr::kable(
+    caption =
+      "One-Day Value at Risk Estimates"
+  )
+```
+
+## Comparison of VaR Models
+
+```{r var-comparison-chart}
+var_results |>
+  dplyr::mutate(
+    confidence =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = confidence,
+      y = var_dollar,
+      fill = model
+    )
+  ) +
+  ggplot2::geom_col(
+    position = "dodge"
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_dollar(
+        prefix = "CAD $"
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Historical vs. Parametric Value at Risk",
+    subtitle =
+      "One-day loss threshold for a CAD 1 million portfolio",
+    x =
+      "Confidence Level",
+    y =
+      "Value at Risk",
+    fill =
+      "VaR Model"
+  )
+```
+
+# Expected Shortfall
+
+Expected Shortfall (ES), also referred to as Conditional Value at Risk (CVaR), measures the average loss conditional on the portfolio having entered the tail beyond its VaR threshold.
+
+Unlike VaR, which identifies a loss threshold, Expected Shortfall provides information about the magnitude of losses once that threshold has been exceeded.
+
+```{r expected-shortfall-models, include=FALSE}
+source(
+  here::here(
+    "R",
+    "06_expected_shortfall.R"
+  )
+)
+```
+
+## Historical Expected Shortfall
+
+At confidence level \(c\), Historical Expected Shortfall is calculated as
+
+\[
+ES_c
+=
+-
+E\left[
+R_p
+\mid
+R_p
+\le
+Q_{1-c}(R_p)
+\right].
+\]
+
+Thus, the 99% Expected Shortfall represents the average portfolio loss among observations lying in approximately the worst 1% of the historical return distribution.
+
+## Parametric Gaussian Expected Shortfall
+
+Under the Gaussian assumption,
+
+\[
+R_p
+\sim
+N(\mu_p,\sigma_p^2),
+\]
+
+Expected Shortfall is
+
+\[
+ES_c
+=
+-\mu_p
++
+\sigma_p
+\frac{
+\phi(z_{1-c})
+}{
+1-c
+},
+\]
+
+where \(\phi(\cdot)\) is the standard normal probability density function.
+
+## Expected Shortfall Estimates
+
+```{r expected-shortfall-table}
+es_results |>
+  dplyr::mutate(
+    `Confidence Level` =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      ),
+
+    `Expected Shortfall (%)` =
+      scales::percent(
+        es_return,
+        accuracy = 0.01
+      ),
+
+    `Expected Shortfall (CAD)` =
+      scales::dollar(
+        es_dollar,
+        prefix = "CAD $"
+      )
+  ) |>
+  dplyr::select(
+    Model = model,
+    `Confidence Level`,
+    `Expected Shortfall (%)`,
+    `Expected Shortfall (CAD)`
+  ) |>
+  knitr::kable(
+    caption =
+      "One-Day Expected Shortfall Estimates"
+  )
+```
+
+## VaR and Expected Shortfall Comparison
+
+```{r var-es-comparison-chart}
+var_es_comparison |>
+  dplyr::select(
+    model,
+    confidence_level,
+    var_dollar,
+    es_dollar
+  ) |>
+  tidyr::pivot_longer(
+    cols = c(
+      var_dollar,
+      es_dollar
+    ),
+    names_to = "risk_measure",
+    values_to = "risk_value"
+  ) |>
+  dplyr::mutate(
+    confidence_level =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      ),
+
+    risk_measure =
+      dplyr::recode(
+        risk_measure,
+        var_dollar = "VaR",
+        es_dollar = "Expected Shortfall"
+      )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = confidence_level,
+      y = risk_value,
+      fill = risk_measure
+    )
+  ) +
+  ggplot2::geom_col(
+    position = "dodge"
+  ) +
+  ggplot2::facet_wrap(
+    ~ model
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_dollar(
+        prefix = "CAD $"
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Value at Risk versus Expected Shortfall",
+    subtitle =
+      "One-day risk measures for a CAD 1 million portfolio",
+    x =
+      "Confidence Level",
+    y =
+      "Estimated Loss",
+    fill =
+      "Risk Measure"
+  )
+```
+
+# Volatility Modelling
+
+Daily financial-market volatility is unlikely to remain constant through time. The rolling-volatility analysis indicates periods of both elevated and subdued risk, motivating the use of conditional volatility models.
+
+Two approaches are considered: Exponentially Weighted Moving Average (EWMA) volatility and a GARCH(1,1) model.
+
+```{r dynamic-volatility-models,include=FALSE}
+source(
+  here::here(
+    "R",
+    "07_volatility_models.R"
+  )
+)
+```
+
+## EWMA Volatility
+
+The EWMA model updates conditional variance according to
+
+\[
+\sigma_t^2
+=
+\lambda\sigma_{t-1}^2
++
+(1-\lambda)r_{t-1}^2.
+\]
+
+The baseline model uses
+
+\[
+\lambda = 0.94.
+\]
+
+Recent observations therefore receive greater influence than distant observations.
+
+## GARCH(1,1)
+
+The GARCH(1,1) conditional variance model is
+
+\[
+\sigma_t^2
+=
+\omega
++
+\alpha\epsilon_{t-1}^2
++
+\beta\sigma_{t-1}^2.
+\]
+
+The parameter \(\alpha\) captures the response of volatility to new shocks, while \(\beta\) captures volatility persistence.
+
+The quantity
+
+\[
+\alpha+\beta
+\]
+
+provides a useful measure of overall volatility persistence.
+
+## Estimated GARCH Parameters
+
+```{r garch-parameter-table}
+garch_parameters |>
+  dplyr::mutate(
+    estimate =
+      round(
+        estimate,
+        6
+      )
+  ) |>
+  knitr::kable(
+    col.names = c(
+      "Parameter",
+      "Estimate"
+    ),
+    caption =
+      "Estimated GARCH(1,1) Parameters"
+  )
+```
+
+## Conditional Volatility Through Time
+
+```{r dynamic-volatility-chart}
+dynamic_volatility |>
+  dplyr::select(
+    date,
+    ewma_annualized_volatility,
+    garch_annualized_volatility
+  ) |>
+  tidyr::pivot_longer(
+    cols = -date,
+    names_to = "model",
+    values_to = "volatility"
+  ) |>
+  dplyr::mutate(
+    model =
+      dplyr::recode(
+        model,
+        ewma_annualized_volatility =
+          "EWMA",
+        garch_annualized_volatility =
+          "GARCH(1,1)"
+      )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date,
+      y = volatility,
+      linetype = model
+    )
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.55
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_percent(
+        accuracy = 1
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Dynamic Portfolio Volatility",
+    subtitle =
+      "EWMA and GARCH(1,1) conditional volatility estimates",
+    x = NULL,
+    y =
+      "Annualized Volatility",
+    linetype =
+      "Model"
+  )
+```
+
+## Returns and Conditional Volatility
+
+```{r returns-volatility-comparison}
+dynamic_volatility |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date
+    )
+  ) +
+  ggplot2::geom_line(
+    ggplot2::aes(
+      y = abs(
+        portfolio_simple_return
+      )
+    ),
+    linewidth = 0.35
+  ) +
+  ggplot2::geom_line(
+    ggplot2::aes(
+      y =
+        garch_daily_volatility
+    ),
+    linewidth = 0.7
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_percent(
+        accuracy = 1
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Absolute Returns and GARCH Conditional Volatility",
+    subtitle =
+      "Volatility increases following periods of large market movements",
+    x = NULL,
+    y =
+      "Daily magnitude"
+  )
+```
+
+# Backtesting
+
+## Out-of-Sample VaR Forecasting
+
+The static VaR estimates presented earlier use the entire historical sample and are therefore primarily descriptive. To evaluate model performance more rigorously, one-day-ahead VaR forecasts are generated using only information available before each forecast date.
+
+A rolling estimation window of 500 trading days is used.
+
+For forecast date \(t\), model parameters are estimated using returns from
+
+\[
+t-500
+\]
+
+through
+
+\[
+t-1.
+\]
+
+The resulting VaR forecast is then compared with the realized return on date \(t\).
+
+Four models are evaluated:
+
+1. Historical Simulation
+2. Rolling Gaussian VaR
+3. EWMA Gaussian VaR
+4. GARCH(1,1) Gaussian VaR
+
+```{r dynamic-var-backtesting, include = FALSE}
+source(
+  here::here(
+    "R",
+    "08_dynamic_var_backtesting.R"
+  )
+)
+```
+
+A VaR violation is recorded when the realized portfolio return falls below the model-implied loss threshold:
+
+\[
+R_t < -VaR_t.
+\]
+
+At the 95% confidence level, the theoretical violation probability is 5%, while at the 99% confidence level it is 1%.
+
+## Backtesting Summary
+
+```{r var-backtest-summary-table}
+var_backtest_summary |>
+  dplyr::mutate(
+
+    `Confidence Level` =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      ),
+
+    `Expected Violation Rate` =
+      scales::percent(
+        expected_violation_rate,
+        accuracy = 0.01
+      ),
+
+    `Actual Violation Rate` =
+      scales::percent(
+        actual_violation_rate,
+        accuracy = 0.01
+      ),
+
+    `Average VaR` =
+      scales::percent(
+        average_var,
+        accuracy = 0.01
+      ),
+
+    `Maximum VaR` =
+      scales::percent(
+        maximum_var,
+        accuracy = 0.01
+      ),
+
+    `Violation Ratio` =
+      round(
+        violation_ratio,
+        2
+      )
+  ) |>
+  dplyr::select(
+    Model = model,
+    `Confidence Level`,
+    Observations = observations,
+    `Expected Violations` = expected_violations,
+    `Actual Violations` = actual_violations,
+    `Expected Violation Rate`,
+    `Actual Violation Rate`,
+    `Violation Ratio`,
+    `Average VaR`,
+    `Maximum VaR`
+  ) |>
+  knitr::kable(
+    caption =
+      "Out-of-Sample VaR Backtesting Summary",
+    digits = 2
+  )
+```
+
+## 99% VaR Through Time
+
+```{r dynamic-99-var-chart}
+dynamic_var_forecasts |>
+  dplyr::filter(
+    confidence_level == 0.99
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date
+    )
+  ) +
+  ggplot2::geom_line(
+    ggplot2::aes(
+      y = realized_loss
+    ),
+    linewidth = 0.3
+  ) +
+  ggplot2::geom_line(
+    ggplot2::aes(
+      y = var_return
+    ),
+    linewidth = 0.7
+  ) +
+  ggplot2::facet_wrap(
+    ~ model,
+    ncol = 2
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_percent(
+        accuracy = 1
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "One-Day 99% VaR Backtest",
+    subtitle =
+      "Realized portfolio losses versus model-implied VaR",
+    x = NULL,
+    y =
+      "Portfolio Loss / VaR"
+  )
+```
+
+## 99% VaR Violations
+
+```{r var-violation-chart}
+dynamic_var_forecasts |>
+  dplyr::filter(
+    confidence_level == 0.99
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date,
+      y = realized_return
+    )
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.3
+  ) +
+  ggplot2::geom_line(
+    ggplot2::aes(
+      y = -var_return
+    ),
+    linewidth = 0.65
+  ) +
+  ggplot2::geom_point(
+    data =
+      dynamic_var_forecasts |>
+      dplyr::filter(
+        confidence_level == 0.99,
+        violation
+      ),
+    size = 1.6
+  ) +
+  ggplot2::facet_wrap(
+    ~ model,
+    ncol = 2
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_percent(
+        accuracy = 1
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "99% VaR Violations",
+    subtitle =
+      "Points identify realized returns below the forecast VaR threshold",
+    x = NULL,
+    y =
+      "Daily Portfolio Return"
+  )
+```
+
+## Statistical VaR Validation
+
+Violation counts alone do not provide sufficient evidence of VaR model adequacy. Formal likelihood-ratio tests are therefore applied to evaluate both the frequency and temporal dependence of VaR exceedances.
+
+Three tests are considered:
+
+1. Kupiec unconditional coverage;
+2. Christoffersen independence;
+3. Christoffersen conditional coverage.
+
+```{r statistical-var-backtesting, include = FALSE}
+source(
+  here::here(
+    "R",
+    "09_var_backtesting_tests.R"
+  )
+)
+```
+
+### Kupiec Unconditional Coverage
+
+Let \(T\) denote the number of VaR forecasts, \(x\) the number of violations, and \(p=1-c\) the theoretical violation probability.
+
+The observed violation rate is
+
+\[
+\hat p
+=
+\frac{x}{T}.
+\]
+
+The Kupiec likelihood-ratio statistic tests
+
+\[
+H_0:
+\hat p=p.
+\]
+
+Under the null hypothesis,
+
+\[
+LR_{UC}
+\sim
+\chi_1^2.
+\]
+
+### Christoffersen Independence
+
+The independence test evaluates whether VaR violations exhibit serial dependence. Let
+
+\[
+I_t
+=
+\begin{cases}
+1, & \text{if a VaR violation occurs},\\
+0, & \text{otherwise}.
+\end{cases}
+\]
+
+Transition counts \(n_{00},n_{01},n_{10},n_{11}\) are used to test whether the probability of a violation depends on the previous day's violation state.
+
+Under the null hypothesis,
+
+\[
+LR_{IND}
+\sim
+\chi_1^2.
+\]
+
+### Conditional Coverage
+
+Conditional coverage jointly evaluates correct violation frequency and independence:
+
+\[
+LR_{CC}
+=
+LR_{UC}
++
+LR_{IND}.
+\]
+
+Under the null hypothesis,
+
+\[
+LR_{CC}
+\sim
+\chi_2^2.
+\]
+
+A 5% significance level is used throughout. Failure to reject a null hypothesis indicates that the available backtesting evidence is not sufficient to reject the corresponding model property.
+
+## Backtesting Test Results
+
+```{r var-validation-results}
+var_model_validation_summary |>
+  dplyr::mutate(
+
+    `Confidence Level` =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      ),
+
+    `Kupiec p-value` =
+      round(
+        kupiec_p_value,
+        4
+      ),
+
+    `Independence p-value` =
+      round(
+        independence_p_value,
+        4
+      ),
+
+    `Conditional Coverage p-value` =
+      round(
+        conditional_coverage_p_value,
+        4
+      )
+  ) |>
+  dplyr::select(
+
+    Model =
+      model,
+
+    `Confidence Level`,
+
+    `Expected Violations` =
+      expected_violations,
+
+    `Actual Violations` =
+      actual_violations,
+
+    `Kupiec p-value`,
+
+    `Kupiec Result` =
+      unconditional_coverage,
+
+    `Independence p-value`,
+
+    `Independence Result` =
+      independence,
+
+    `Conditional Coverage p-value`,
+
+    `Conditional Coverage Result` =
+      conditional_coverage
+  ) |>
+  knitr::kable(
+    caption =
+      "Formal VaR Backtesting Results",
+    digits = 3
+  )
+```
+
+## Statistical Backtesting Comparison
+
+```{r backtesting-pvalue-chart}
+var_model_validation_summary |>
+  dplyr::select(
+    model,
+    confidence_level,
+    kupiec_p_value,
+    independence_p_value,
+    conditional_coverage_p_value
+  ) |>
+  tidyr::pivot_longer(
+
+    cols = c(
+      kupiec_p_value,
+      independence_p_value,
+      conditional_coverage_p_value
+    ),
+
+    names_to =
+      "test",
+
+    values_to =
+      "p_value"
+  ) |>
+  dplyr::mutate(
+
+    test =
+      dplyr::recode(
+
+        test,
+
+        kupiec_p_value =
+          "Kupiec Coverage",
+
+        independence_p_value =
+          "Christoffersen Independence",
+
+        conditional_coverage_p_value =
+          "Conditional Coverage"
+      ),
+
+    confidence_level =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = test,
+      y = p_value
+    )
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 0.05,
+    linetype = "dashed"
+  ) +
+  ggplot2::geom_point(
+    size = 2.5
+  ) +
+  ggplot2::facet_grid(
+    confidence_level ~ model
+  ) +
+  ggplot2::labs(
+    title =
+      "VaR Backtesting Test p-values",
+    subtitle =
+      "Dashed line represents the 5% significance threshold",
+    x = NULL,
+    y = "p-value"
+  ) +
+  ggplot2::coord_cartesian(
+    ylim = c(
+      0,
+      1
+    )
+  )
+```
+
+# Stress Testing
+
+VaR and Expected Shortfall characterize portfolio risk using an estimated return distribution. Stress testing provides a complementary perspective by evaluating portfolio performance under severe historical or hypothetical scenarios without requiring an explicit probability for each scenario.
+
+Three forms of stress analysis are considered:
+
+1. historical stress windows;
+2. empirical extreme historical losses;
+3. hypothetical security-level shocks.
+
+```{r stress-testing-models, include=FALSE}
+source(
+  here::here(
+    "R",
+    "10_stress_testing.R"
+  )
+)
+```
+
+## Historical Stress Scenarios
+
+Historical stress tests replay realized portfolio returns over predefined periods of elevated market stress.
+
+For a scenario containing \(T\) daily returns, cumulative portfolio performance is calculated as
+
+\[
+R_{\text{scenario}}
+=
+\prod_{t=1}^{T}
+(1+R_{p,t})-1.
+\]
+
+The corresponding portfolio P&L is
+
+\[
+PnL_{\text{scenario}}
+=
+V_0
+R_{\text{scenario}}.
+\]
+
+```{r historical-stress-table}
+historical_stress_results |>
+  dplyr::mutate(
+
+    `Cumulative Return` =
+      scales::percent(
+        cumulative_return,
+        accuracy = 0.01
+      ),
+
+    `Portfolio P&L` =
+      scales::dollar(
+        portfolio_pnl,
+        prefix = "CAD $"
+      ),
+
+    `Worst Daily Return` =
+      scales::percent(
+        worst_daily_return,
+        accuracy = 0.01
+      ),
+
+    `Maximum Drawdown` =
+      scales::percent(
+        maximum_drawdown,
+        accuracy = 0.01
+      ),
+
+    `Realized Volatility` =
+      scales::percent(
+        annualized_realized_volatility,
+        accuracy = 0.01
+      )
+  ) |>
+  dplyr::select(
+
+    Scenario =
+      scenario,
+
+    `Start Date` =
+      start_date,
+
+    `End Date` =
+      end_date,
+
+    `Trading Days` =
+      trading_days,
+
+    `Cumulative Return`,
+
+    `Portfolio P&L`,
+
+    `Worst Daily Return`,
+
+    `Maximum Drawdown`,
+
+    `Realized Volatility`
+  ) |>
+  knitr::kable(
+    caption =
+      "Historical Portfolio Stress Tests"
+  )
+```
+
+## Portfolio Performance During Historical Stress
+
+```{r historical-stress-chart}
+historical_stress_series |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = date,
+      y = scenario_cumulative_return
+    )
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linewidth = 0.3
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.7
+  ) +
+  ggplot2::facet_wrap(
+    ~ scenario,
+    scales = "free_x",
+    ncol = 1
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_percent(
+        accuracy = 1
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Portfolio Performance During Historical Stress Scenarios",
+    subtitle =
+      "Cumulative return from the beginning of each stress window",
+    x = NULL,
+    y =
+      "Cumulative Portfolio Return"
+  )
+```
+
+## Empirical Extreme Losses
+
+The historical sample is also searched mechanically for the worst one-day return and the worst five-trading-day compounded return.
+
+```{r empirical-extreme-events}
+empirical_extreme_events |>
+  dplyr::mutate(
+
+    `Stress Return` =
+      scales::percent(
+        stress_return,
+        accuracy = 0.01
+      ),
+
+    `Portfolio P&L` =
+      scales::dollar(
+        stress_pnl,
+        prefix = "CAD $"
+      ),
+
+    `Stress Loss` =
+      scales::dollar(
+        stress_loss,
+        prefix = "CAD $"
+      )
+  ) |>
+  dplyr::select(
+
+    Scenario =
+      scenario,
+
+    `End Date` =
+      end_date,
+
+    `Stress Return`,
+
+    `Portfolio P&L`,
+
+    `Stress Loss`
+  ) |>
+  knitr::kable(
+    caption =
+      "Most Severe Empirical Portfolio Losses"
+  )
+```
+
+## Hypothetical Stress Scenarios
+
+Hypothetical stress tests impose predetermined shocks directly on the six bank positions. For a vector of asset shocks \(\mathbf{s}\),
+
+\[
+R_p^{stress}
+=
+\mathbf{w}'\mathbf{s}.
+\]
+
+The corresponding dollar impact is
+
+\[
+PnL_p^{stress}
+=
+V_0
+R_p^{stress}.
+\]
+
+The scenarios are deliberately severe and are intended for sensitivity analysis rather than as probabilistic forecasts.
+
+```{r hypothetical-stress-table}
+hypothetical_stress_results |>
+  dplyr::mutate(
+
+    `Portfolio Stress Return` =
+      scales::percent(
+        portfolio_stress_return,
+        accuracy = 0.01
+      ),
+
+    `Portfolio P&L` =
+      scales::dollar(
+        portfolio_stress_pnl,
+        prefix = "CAD $"
+      ),
+
+    `Stress Loss` =
+      scales::dollar(
+        stress_loss,
+        prefix = "CAD $"
+      )
+  ) |>
+  dplyr::select(
+
+    Scenario =
+      scenario,
+
+    `Portfolio Stress Return`,
+
+    `Portfolio P&L`,
+
+    `Stress Loss`
+  ) |>
+  knitr::kable(
+    caption =
+      "Hypothetical Portfolio Stress Tests"
+  )
+```
+
+## Hypothetical Stress Loss Comparison
+
+```{r hypothetical-stress-chart}
+hypothetical_stress_results |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = reorder(
+        scenario,
+        stress_loss
+      ),
+      y = stress_loss
+    )
+  ) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_dollar(
+        prefix = "CAD $"
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Portfolio Loss Under Hypothetical Stress Scenarios",
+    subtitle =
+      "Stress losses for the CAD 1 million Canadian bank portfolio",
+    x = NULL,
+    y =
+      "Stress Loss"
+  )
+```
+
+# Risk Dashboard and Model Comparison
+
+## Latest Dynamic VaR Estimates
+
+```{r latest-var-dashboard}
+latest_var_dashboard |>
+  dplyr::mutate(
+
+    `Confidence Level` =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      ),
+
+    `VaR (%)` =
+      scales::percent(
+        var_return,
+        accuracy = 0.01
+      ),
+
+    `VaR (CAD)` =
+      scales::dollar(
+        var_dollar,
+        prefix = "CAD $"
+      )
+  ) |>
+  dplyr::select(
+
+    Date =
+      date,
+
+    Model =
+      model,
+
+    `Confidence Level`,
+
+    `VaR (%)`,
+
+    `VaR (CAD)`
+  ) |>
+  knitr::kable(
+    caption =
+      "Latest One-Day Dynamic VaR Estimates"
+  )
+```
+
+## VaR Model Comparison
+
+```{r model-comparison-table}
+model_comparison_dashboard |>
+  dplyr::mutate(
+
+    `Confidence Level` =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      ),
+
+    `Violation Rate` =
+      scales::percent(
+        actual_violation_rate,
+        accuracy = 0.01
+      ),
+
+    `Violation Ratio` =
+      round(
+        violation_ratio,
+        2
+      ),
+
+    `Average VaR` =
+      scales::percent(
+        average_var,
+        accuracy = 0.01
+      ),
+
+    `Kupiec p-value` =
+      round(
+        kupiec_p_value,
+        3
+      ),
+
+    `Independence p-value` =
+      round(
+        independence_p_value,
+        3
+      ),
+
+    `Conditional Coverage p-value` =
+      round(
+        conditional_coverage_p_value,
+        3
+      )
+  ) |>
+  dplyr::select(
+
+    Model =
+      model,
+
+    `Confidence Level`,
+
+    `Expected Violations` =
+      expected_violations,
+
+    `Actual Violations` =
+      actual_violations,
+
+    `Violation Rate`,
+
+    `Violation Ratio`,
+
+    `Average VaR`,
+
+    `Kupiec p-value`,
+
+    `Independence p-value`,
+
+    `Conditional Coverage p-value`,
+
+    `Tests Passed` =
+      statistical_tests_passed,
+
+    Assessment =
+      validation_assessment
+  ) |>
+  knitr::kable(
+    caption =
+      "VaR Model Performance and Validation Summary",
+    digits = 3
+  )
+```
+
+
+## Latest VaR Across Models
+
+```{r latest-var-comparison-chart}
+latest_var_dashboard |>
+  dplyr::mutate(
+
+    confidence_level =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = model,
+      y = var_dollar
+    )
+  ) +
+  ggplot2::geom_col() +
+  ggplot2::facet_wrap(
+    ~ confidence_level
+  ) +
+  ggplot2::coord_flip() +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_dollar(
+        prefix = "CAD $"
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Latest VaR Estimates Across Models",
+    subtitle =
+      "One-day risk estimates for the CAD 1 million portfolio",
+    x = NULL,
+    y =
+      "Value at Risk"
+  )
+```
+
+## VaR Calibration Across Models
+
+```{r violation-ratio-chart}
+model_comparison_dashboard |>
+  dplyr::mutate(
+
+    confidence_level =
+      scales::percent(
+        confidence_level,
+        accuracy = 1
+      )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = model,
+      y = violation_ratio
+    )
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 1,
+    linetype = "dashed"
+  ) +
+  ggplot2::geom_point(
+    size = 3
+  ) +
+  ggplot2::facet_wrap(
+    ~ confidence_level
+  ) +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title =
+      "Actual versus Expected VaR Violations",
+    subtitle =
+      "A violation ratio of 1 indicates exact agreement with the expected number of breaches",
+    x = NULL,
+    y =
+      "Violation Ratio"
+  )
+```
+
+## Stress-Loss Comparison
+
+```{r dashboard-stress-comparison}
+stress_comparison_dashboard |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = reorder(
+        scenario,
+        stress_loss
+      ),
+      y = stress_loss
+    )
+  ) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::facet_wrap(
+    ~ stress_type,
+    scales = "free_y"
+  ) +
+  ggplot2::scale_y_continuous(
+    labels =
+      scales::label_dollar(
+        prefix = "CAD $"
+      )
+  ) +
+  ggplot2::labs(
+    title =
+      "Portfolio Loss Across Stress Scenarios",
+    subtitle =
+      "Historical, empirical, and hypothetical stress losses",
+    x = NULL,
+    y =
+      "Portfolio Stress Loss"
+  )
+```
+
+# Model Limitations
+
+The results of the market risk engine should be interpreted subject to several important model and data limitations.
+
+## Distributional Assumptions
+
+The Rolling Gaussian, EWMA, and baseline GARCH VaR specifications use Gaussian conditional return assumptions. Financial returns can exhibit negative skewness, excess kurtosis, and extreme observations that occur more frequently than implied by a normal distribution. Consequently, Gaussian models may underestimate tail risk even when their volatility forecasts are well calibrated.
+
+Historical Simulation avoids an explicit parametric distributional assumption but is restricted by the empirical observations contained within the estimation window. It cannot naturally generate losses more severe than those already represented in the historical sample.
+
+## Parameter and Estimation Risk
+
+VaR and volatility estimates depend on choices such as the estimation-window length, EWMA decay parameter, GARCH specification, innovation distribution, and model refitting frequency. Alternative specifications may produce materially different risk estimates.
+
+The 500-trading-day rolling window represents a compromise between responsiveness and statistical precision. A shorter window may react more quickly to regime changes but produces noisier estimates, while a longer window may provide greater stability at the cost of slower adaptation.
+
+## Volatility Model Risk
+
+EWMA assumes a fixed decay parameter of
+
+\[
+\lambda=0.94,
+\]
+
+rather than estimating persistence directly from the portfolio data.
+
+The GARCH(1,1) model provides greater flexibility by estimating volatility persistence, but its performance remains dependent on the selected variance equation and innovation distribution. More sophisticated specifications, including Student-\(t\), asymmetric GARCH, or regime-switching models, could capture additional features of the return process.
+
+## Backtesting Limitations
+
+Failure to reject a VaR model in the Kupiec or Christoffersen tests does not prove that the model is correct. Statistical tests have finite-sample limitations, particularly at high confidence levels where relatively few violations are expected.
+
+For example, a 99% VaR backtest uses only approximately 1% of observations as expected violations. Consequently, inference concerning extreme-tail calibration is based on relatively limited information.
+
+Backtesting results should therefore be interpreted as evidence regarding model adequacy rather than definitive proof of model validity.
+
+## Portfolio Concentration
+
+The portfolio contains six individual securities but remains concentrated entirely within the Canadian banking industry.
+
+Because bank returns can become highly correlated during systemic periods of stress, diversification across individual banks provides substantially less protection than diversification across independent sectors, geographies, and asset classes.
+
+The engine therefore measures the risk of a deliberately concentrated Canadian-bank portfolio rather than a broadly diversified institutional portfolio.
+
+## Market and Liquidity Risk
+
+The analysis is based primarily on closing-price returns and does not explicitly model:
+
+- bid-ask spreads;
+- market depth;
+- transaction costs;
+- price impact;
+- liquidity deterioration;
+- trading halts;
+- execution delays.
+
+During stressed markets, these effects can increase realized losses beyond those implied by closing-price VaR calculations.
+
+## Stress-Scenario Limitations
+
+Historical stress tests are constrained by events that occurred during the available sample period, while hypothetical scenarios depend on analyst judgement.
+
+Stress scenarios should therefore be interpreted as sensitivity analyses rather than forecasts with assigned probabilities.
+
+## Model Scope
+
+The engine focuses on equity market risk. It does not separately model the banks' underlying exposures to credit risk, interest-rate risk, funding risk, foreign-exchange risk, operational risk, or liquidity risk.
+
+The results should therefore not be interpreted as measures of the total enterprise risk of the underlying financial institutions.
+
+# Risk Management Recommendations
+
+Based on the combined VaR, Expected Shortfall, volatility, backtesting, and stress-testing framework, the following risk-management practices are appropriate for the portfolio.
+
+### 1. Use Dynamic VaR for Day-to-Day Monitoring
+
+Conditional volatility models such as EWMA and GARCH should be considered alongside static risk measures because portfolio volatility changes through time. Dynamic models can respond more rapidly when market conditions deteriorate.
+
+### 2. Maintain a Challenger-Model Framework
+
+No single VaR methodology should be treated as uniquely correct. Historical Simulation, Gaussian, EWMA, and GARCH estimates should be compared regularly, particularly when their risk estimates diverge materially.
+
+Large differences between models can themselves provide useful information about model uncertainty.
+
+### 3. Monitor Expected Shortfall Alongside VaR
+
+VaR identifies a tail threshold but provides no information regarding the severity of losses beyond that threshold. Expected Shortfall should therefore be monitored as a complementary tail-risk measure.
+
+### 4. Treat Backtesting as an Ongoing Validation Process
+
+Violation frequencies and clustering should be reassessed whenever new observations become available. Persistent rejection of unconditional or conditional coverage would indicate the need to recalibrate or reconsider the affected model.
+
+### 5. Maintain Stress Limits Separately from VaR Limits
+
+Severe historical and hypothetical losses can be substantially larger than model-implied daily VaR. Stress-testing limits should therefore complement rather than replace ordinary VaR monitoring.
+
+### 6. Recognize Sector Concentration Explicitly
+
+The portfolio's six positions are all exposed to common Canadian banking-sector risk factors. A broader portfolio would require diversification across sectors, geographies, and potentially asset classes to reduce systemic concentration.
+
+### 7. Reassess Models During Structural Change
+
+Risk-model parameters estimated from historical data may become less representative following changes in monetary policy, regulation, financial-market structure, or macroeconomic conditions. Model performance should therefore be reviewed when significant structural changes occur.
+
+# Conclusion
+
+The Canadian Bank Market Risk VaR Engine demonstrates how multiple quantitative risk methodologies can be integrated into a single reproducible framework for portfolio market-risk measurement and model validation.
+
+The analysis begins with adjusted market prices and constructs a constant-weight portfolio return series for six major Canadian banks. Static Historical Simulation and Gaussian VaR provide baseline measures of downside risk, while Expected Shortfall extends the analysis by quantifying the severity of losses beyond the VaR threshold.
+
+The empirical return analysis demonstrates that market risk is dynamic rather than constant through time. EWMA and GARCH(1,1) models address this feature by producing conditional volatility estimates that respond to changing market conditions.
+
+The rolling backtesting framework represents a particularly important improvement over full-sample risk estimation. By generating each VaR forecast using only information available before the realized return, the analysis permits genuine out-of-sample evaluation. Kupiec and Christoffersen tests then evaluate whether VaR violations occur with the appropriate frequency and whether those violations exhibit statistically significant clustering.
+
+At the 99% confidence level, **`r preferred_model_name`** receives the highest descriptive ranking in the current validation framework, passing `r preferred_model_tests_passed` of three statistical backtesting criteria and producing a violation ratio of approximately `r round(preferred_model_violation_ratio, 2)`. This result represents evidence in favor of the model within the present sample and specification, rather than proof that it will remain superior under future market regimes.
+
+Stress testing demonstrates why VaR should not be used as a complete measure of portfolio downside risk. The largest stress loss evaluated by the engine is approximately **`r scales::dollar(largest_stress_loss, prefix = "CAD $")`**, which can materially exceed normal one-day VaR estimates. Expected Shortfall and stress testing therefore provide essential complementary information concerning the severity of extreme losses.
+
+From a risk-management perspective, the principal conclusion is that no single model should be relied upon in isolation. Dynamic VaR provides useful short-horizon monitoring, Historical Simulation supplies a non-parametric challenger model, Expected Shortfall measures extreme-tail severity, and stress testing evaluates losses outside the assumptions of the probabilistic VaR framework.
+
+The portfolio also remains materially exposed to sector concentration. Holding six Canadian banks provides diversification across issuers but limited protection against systemic shocks affecting the Canadian financial sector as a whole.
+
+Overall, the engine illustrates a model-risk principle that is central to market risk management: risk estimates are conditional on the data, assumptions, and methodology used to produce them. Effective risk management therefore requires not only calculating VaR, but validating it, challenging it with alternative models, examining losses beyond VaR, and evaluating portfolio resilience under severe stress.
+

@@ -1,0 +1,2 @@
+observations,start_date,end_date,mean_daily_return,daily_volatility,annualized_return,annualized_volatility,skewness,excess_kurtosis,minimum_daily_return,maximum_daily_return,maximum_drawdown
+2894,2015-01-05,2026-07-15,6.537444891443682e-4,0.010830276676421563,0.1617575239790363,0.17192531229500765,0.40996529535570897,50.27100102604123,-0.13435474785949877,0.17068427814188905,-0.3945752223619108

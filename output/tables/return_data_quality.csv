@@ -1,0 +1,7 @@
+ticker,bank_name,first_return_date,last_return_date,number_of_returns,missing_simple_returns,missing_log_returns,minimum_simple_return,maximum_simple_return
+BMO.TO,Bank of Montreal,2015-01-05,2026-07-15,2894,0,0,-0.1641337666539031,0.1697520740607359
+BNS.TO,Bank of Nova Scotia,2015-01-05,2026-07-15,2894,0,0,-0.13372065376196762,0.1683773818770653
+CM.TO,Canadian Imperial Bank of Commerce,2015-01-05,2026-07-15,2894,0,0,-0.17133525544637018,0.18957762128942646
+NA.TO,National Bank of Canada,2015-01-05,2026-07-15,2894,0,0,-0.16757645331826276,0.19571400302240471
+RY.TO,Royal Bank of Canada,2015-01-05,2026-07-15,2894,0,0,-0.10538307553522253,0.1489632117640849
+TD.TO,Toronto-Dominion Bank,2015-01-05,2026-07-15,2894,0,0,-0.1233001942988412,0.17881949780924966

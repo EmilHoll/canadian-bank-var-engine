@@ -1,0 +1,7 @@
+ticker,bank_name,first_observation,last_observation,number_of_observations,missing_adjusted_prices,duplicate_dates
+BMO.TO,Bank of Montreal,2015-01-02,2026-07-15,2895,0,0
+BNS.TO,Bank of Nova Scotia,2015-01-02,2026-07-15,2895,0,0
+CM.TO,Canadian Imperial Bank of Commerce,2015-01-02,2026-07-15,2895,0,0
+NA.TO,National Bank of Canada,2015-01-02,2026-07-15,2895,0,0
+RY.TO,Royal Bank of Canada,2015-01-02,2026-07-15,2895,0,0
+TD.TO,Toronto-Dominion Bank,2015-01-02,2026-07-15,2895,0,0

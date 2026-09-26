@@ -1,0 +1,9 @@
+scenario,stress_type,stress_loss
+COVID-19 Market Shock,Historical,392163.1558565577
+Worst Historical 5-Day Loss,Empirical Extreme,268397.1371085836
+Severe Systemic Bank Shock,Hypothetical,200000
+2022 Tightening Selloff,Historical,171845.57590124328
+Worst Historical 1-Day Loss,Empirical Extreme,134354.74785949878
+Recession and Credit Stress,Hypothetical,126666.66666666666
+Broad Bank Selloff,Hypothetical,100000
+2023 Banking Stress,Historical,81542.70408211283
